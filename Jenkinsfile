@@ -4,9 +4,9 @@ pipeline {
   environment {
     DEV_REPO  = "in29mins/devops-app-dev"
     PROD_REPO = "in29mins/devops-app-prod"
-    DOCKER_CRED = "dockerhub-creds"
-    SSH_CRED = "ec2-ssh-creds"        // Jenkins credentials id for SSH (SSH Username with private key)
-    EC2_HOST = "3.141.196.94"         // EC2 IP (no "ubuntu@" here)
+    DOCKER_CRED = "dockerhub-creds"   // Jenkins credential id for Docker Hub
+    SSH_CRED = "ec2-ssh-creds"        // Jenkins credential id for SSH (SSH Username with private key)
+    EC2_HOST = "3.141.196.94"         // EC2 public IP (no "ubuntu@" here)
   }
 
   stages {
@@ -19,22 +19,19 @@ pipeline {
     stage('Build & Push Image') {
       steps {
         script {
-          // Choose repo based on branch
-          def repo = (env.BRANCH_NAME == 'master') ? "${PROD_REPO}" : "${DEV_REPO}"
-          def tag = "${env.BUILD_NUMBER}"
+          // choose the repo based on the branch
+          def repo = (env.BRANCH_NAME == 'master') ? env.PROD_REPO : env.DEV_REPO
+          def tag  = env.BUILD_NUMBER ?: "latest"
           def imageName = "${repo}:${tag}"
 
           echo "Building image ${imageName}"
 
-          // Login to Docker registry using credentials id
-          docker.withRegistry('', DOCKER_CRED) {
+          // Use env.DOCKER_CRED (credential id) when calling docker.withRegistry
+          docker.withRegistry('', env.DOCKER_CRED) {
             def built = docker.build(imageName)
             built.push()
-            // Optionally also push 'latest' for dev or master
-            if (env.BRANCH_NAME == 'dev') {
-              built.push("latest")
-            }
-            if (env.BRANCH_NAME == 'master') {
+            // push 'latest' for dev or master branches as an option
+            if (env.BRANCH_NAME == 'dev' || env.BRANCH_NAME == 'master') {
               built.push("latest")
             }
           }
@@ -48,15 +45,15 @@ pipeline {
       }
       steps {
         script {
-          // Use sshagent to use the SSH private key credential stored in Jenkins
-          sshagent (credentials: ['ec2-ssh-creds']) {
-            // Pull and restart container on remote EC2
-            sh """
-              ssh -o StrictHostKeyChecking=no ubuntu@${EC2_HOST} \\
-                'docker pull ${PROD_REPO}:${env.BUILD_NUMBER} && \\
-                 docker rm -f devops-app || true && \\
-                 docker run -d --name devops-app -p 80:80 --restart unless-stopped ${PROD_REPO}:${env.BUILD_NUMBER}'
-            """
+          // Use sshagent with the credential id from env.SSH_CRED
+          sshagent(credentials: [env.SSH_CRED]) {
+            // Single-line remote command to avoid broken strings
+            def remoteImage = "${env.PROD_REPO}:${env.BUILD_NUMBER}"
+            def sshCmd = "ssh -o StrictHostKeyChecking=no ubuntu@${env.EC2_HOST} " +
+                         "'docker pull ${remoteImage} && docker rm -f devops-app || true && " +
+                         "docker run -d --name devops-app -p 80:80 --restart unless-stopped ${remoteImage}'"
+            echo "Running remote deploy: ${sshCmd}"
+            sh sshCmd
           }
         }
       }
@@ -64,11 +61,7 @@ pipeline {
   }
 
   post {
-    success {
-      echo "Pipeline finished: SUCCESS"
-    }
-    failure {
-      echo "Pipeline finished: FAILURE"
-    }
+    success { echo "Pipeline finished: SUCCESS" }
+    failure { echo "Pipeline finished: FAILURE" }
   }
 }
